@@ -73,7 +73,7 @@ func (r *ZitiRouterReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	// Initialize completion Resource status
 	configMapReady := false
 	deploymentReady := false
-
+	log.Info("Right before addOrUpdateRouterConfiguration")
 	// Add or Update Router Configuration
 	if err := r.addOrUpdateRouterConfiguration(ctx, zitirouter); err != nil {
 		log.Error(err, "Failed to add or update Configuration Map for Ziti Router")
@@ -141,32 +141,37 @@ func (r *ZitiRouterReconciler) updateStatus(ctx context.Context, zitirouter *zit
 func (r *ZitiRouterReconciler) addOrUpdateRouterConfiguration(ctx context.Context, zitirouter *zitiv1alpha1.ZitiRouter) error {
 	log := log.FromContext(ctx)
 	deployedRouterConfiguration := &corev1.ConfigMapList{}
-
+	log.Info("In router addOrUpdateRouterConfiguration")
 	err := r.List(ctx, deployedRouterConfiguration, &client.ListOptions{
 		Namespace: zitirouter.ObjectMeta.Namespace,
 	})
 	if err != nil {
 		return err
 	}
-
 	if len(deployedRouterConfiguration.Items) > 0 {
-		// Configuration exists, update it
-		existingConfiguration := &deployedRouterConfiguration.Items[0] // Assuming only one configuration exists
-		createNewConfiguration := createNewRouterConfiguration(zitirouter)
-
-		// Compare relevant fields to determine if an update is needed
-		if existingConfiguration != createNewConfiguration {
-			// Deployment has drifted, update it
-			existingConfiguration = createNewConfiguration
-			if err := r.Update(ctx, existingConfiguration); err != nil {
-				return err
+		// Search for router configmap if exists
+		log.Info("list of configmaps", "List of Items", deployedRouterConfiguration.Items)
+		for _, configmap := range deployedRouterConfiguration.Items {
+			// If exists
+			if configmap.ObjectMeta.Name == zitirouter.Spec.RouterDeploymentNamePrefix+"-config" {
+				existingConfiguration := &configmap
+				createNewConfiguration := createNewRouterConfiguration(zitirouter)
+				// Compare relevant fields to determine if an update is needed
+				if existingConfiguration != createNewConfiguration {
+					// Deployment has drifted, update it
+					existingConfiguration = createNewConfiguration
+					if err := r.Update(ctx, existingConfiguration); err != nil {
+						return err
+					}
+					log.Info("Configuration updated", "configuration", existingConfiguration.Name)
+					r.recoder.Event(zitirouter, corev1.EventTypeNormal, "ConfigurationUpdated", "Router Configuration updated successfully")
+				} else {
+					log.Info("Configuration is up to date, no action required", "configuration", existingConfiguration.Name)
+				}
+				return nil
 			}
-			log.Info("Configuration updated", "configuration", existingConfiguration.Name)
-			r.recoder.Event(zitirouter, corev1.EventTypeNormal, "ConfigurationUpdated", "Router Configuration updated successfully")
-		} else {
-			log.Info("Configuration is up to date, no action required", "configuration", existingConfiguration.Name)
 		}
-		return nil
+
 	}
 
 	// Router Configuration does not exist, create it
@@ -197,6 +202,7 @@ func (r *ZitiRouterReconciler) addOrUpdateRouterDeployment(ctx context.Context, 
 
 	if len(deployedRouterList.Items) > 0 {
 		// Deployment exists, update it
+		log.Info("Found exisitng configuration", "configuration", deployedRouterList)
 		existingDeployment := &deployedRouterList.Items[0] // Assuming only one deployment exists
 		configuredDeployment := createRouterDeployment(zitirouter)
 
@@ -214,7 +220,7 @@ func (r *ZitiRouterReconciler) addOrUpdateRouterDeployment(ctx context.Context, 
 		}
 		return nil
 	}
-
+	log.Info("Updating configuration", "configuration", deployedRouterList)
 	// Deployment does not exist, create it
 	newDeployment := createRouterDeployment(zitirouter)
 	if err := controllerutil.SetControllerReference(zitirouter, newDeployment, r.Scheme); err != nil {
@@ -229,9 +235,82 @@ func (r *ZitiRouterReconciler) addOrUpdateRouterDeployment(ctx context.Context, 
 }
 
 func createNewRouterConfiguration(zitirouter *zitiv1alpha1.ZitiRouter) *corev1.ConfigMap {
-	var c ze.Config = ze.Route{
+	log := log.Log
+	c := &ze.Router{
 		Version: 3,
+		Identity: ze.Identity{
+			Cert:           "/etc/ziti/config" + zitirouter.Spec.RouterDeploymentNamePrefix + ".cert",
+			ServerCert:     "/etc/ziti/config" + zitirouter.Spec.RouterDeploymentNamePrefix + ".server.chain.cert",
+			Key:            "/etc/ziti/config" + zitirouter.Spec.RouterDeploymentNamePrefix + ".key",
+			Ca:             "/etc/ziti/config" + zitirouter.Spec.RouterDeploymentNamePrefix + ".cas",
+			AltServerCerts: ze.AltServerCerts{},
+		},
+		Controller: ze.Controller{
+			Endpoint: "tls:" + zitirouter.Spec.ZitiMgmtApi,
+		},
+		Link: ze.Link{
+			Dialers: []ze.LinkDialer{
+				{
+					Binding: "transport",
+				},
+			},
+			Listeners: []ze.LinkListener{},
+		},
+		Listeners: []ze.EdgeListener{
+			{
+				Binding: "edge",
+				Address: "tls:0.0.0.0:8443",
+				Options: ze.EdgeListenerOptions{
+					Advertise:         "tls::443",
+					ConnectTimeoutMs:  5000,
+					GetSessionTimeout: 60,
+				},
+			},
+			{
+				Binding: "tunnel",
+				Options: ze.EdgeListenerOptions{
+					Mode:     "tproxy",
+					Resolver: "udp://127.0.0.1:53",
+					LanIf:    "lo",
+				},
+			},
+		},
+		CSR: ze.CSR{},
+		Edge: ze.Edge{
+			CSR: ze.CSR{
+				Country:            "US",
+				Province:           "NC",
+				Locality:           "Charlotte",
+				Organization:       "NetFoundry",
+				OrganizationalUnit: "Ziti",
+				Sans: ze.Sans{
+					Dns: []string{
+						"localhost",
+					},
+					Ip: []string{
+						"127.0.0.1",
+					},
+				},
+			},
+		},
+		Transport: ze.Transport{},
+		Forwarder: ze.Forwarder{
+			ListatencyProbeInterval: 0,
+			XgressDialQueueLength:   1000,
+			XgressDialWorkerCount:   128,
+			LinkDialQueueLength:     1000,
+			LinkDialWorkerCount:     32,
+			RateLimitedQueueLength:  5000,
+			RateLimitedWorkerCount:  64,
+		},
 	}
+
+	routerConfig, err := c.MarshalYAML()
+	if err != nil {
+		log.Info("Error marshalling config", zitirouter.ObjectMeta.Name, err)
+		return &corev1.ConfigMap{}
+	}
+
 	return &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      zitirouter.Spec.RouterDeploymentNamePrefix + "-config",
@@ -241,7 +320,7 @@ func createNewRouterConfiguration(zitirouter *zitiv1alpha1.ZitiRouter) *corev1.C
 			},
 		},
 		Data: map[string]string{
-			"ziti-router.yaml": c.Update(),
+			"ziti-router.yaml": string(routerConfig),
 		},
 	}
 }
@@ -298,7 +377,7 @@ func createRouterDeployment(zitirouter *zitiv1alpha1.ZitiRouter) *appsv1.Statefu
 								},
 								{
 									Name:  "ZITI_HOME",
-									Value: "",
+									Value: "/etc/ziti",
 								},
 								{
 									Name:  "ZITI_ROUTER_NAME",
@@ -313,12 +392,12 @@ func createRouterDeployment(zitirouter *zitiv1alpha1.ZitiRouter) *appsv1.Statefu
 							VolumeMounts: []corev1.VolumeMount{
 								{
 									Name:      "config-data",
-									MountPath: "/etc/ziti",
+									MountPath: "/etc/ziti/config",
 								},
 								{
 									Name:      "ziti-router-config",
-									MountPath: "/etc/ziti/config",
-									SubPath:   "config",
+									MountPath: "/etc/ziti/config/ziti-router.yaml",
+									SubPath:   "ziti-router.yaml",
 								},
 							},
 						},
