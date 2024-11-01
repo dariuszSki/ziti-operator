@@ -28,21 +28,21 @@ type ZitiRouterSpec struct {
 	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
 	// Important: Run "make" to regenerate code after modifying this file
 
-	// Ziti Network Controller Base URL https://${fqdn or ip}:port
+	// Controller Base URL https://${fqdn or ip}:port
 	// +kubebuilder:validation:Optional
 	ZitiMgmtApi string `json:"zitiMgmtApi"`
 
-	// Ziti Network Controller Base URL https://${fqdn or ip}:port
+	// Controller Enrollment token to enroll admin user
 	// +kubebuilder:validation:Pattern=`^([a-zA-Z0-9_=]+)\.([a-zA-Z0-9_=]+)\.([a-zA-Z0-9_\-\+\/=]*)`
 	// +kubebuilder:validation:Optional
 	ZitiAdminEnrollmentToken string `json:"zitiAdminEnrollmentToken"`
 
-	// Ziti Network Controller Base URL https://${fqdn or ip}:port
+	// Router Enrollment token to register it with Ziti Network
 	// +kubebuilder:validation:Pattern=`^([a-zA-Z0-9_=]+)\.([a-zA-Z0-9_=]+)\.([a-zA-Z0-9_\-\+\/=]*)`
 	// +kubebuilder:validation:Optional
 	ZitiRouterEnrollmentToken string `json:"zitiRouterEnrollmentToken"`
 
-	// rourter deployment name
+	// Router deployment name
 	// +kubebuilder:validation:MaxLength:=63
 	RouterDeploymentNamePrefix string `json:"routerDeploymentNamePrefix"`
 
@@ -53,6 +53,9 @@ type ZitiRouterSpec struct {
 	// Router Containter Image Version
 	// +kubebuilder:default:=latest
 	ImageTag string `json:"imageTag"`
+
+	// Router Log Level
+	Debug string `json:"debug"`
 }
 
 // ZitiRouterStatus defines the observed state of ZitiRouter

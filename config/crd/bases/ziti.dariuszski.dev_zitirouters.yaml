@@ -39,12 +39,15 @@ spec:
           spec:
             description: ZitiRouterSpec defines the desired state of ZitiRouter
             properties:
+              debug:
+                description: Router Log Level
+                type: string
               imageTag:
                 default: latest
                 description: Router Containter Image Version
                 type: string
               routerDeploymentNamePrefix:
-                description: rourter deployment name
+                description: Router deployment name
                 maxLength: 63
                 type: string
               routerReplicas:
@@ -53,17 +56,18 @@ spec:
                 format: int32
                 type: integer
               zitiAdminEnrollmentToken:
-                description: Ziti Network Controller Base URL https://${fqdn or ip}:port
+                description: Controller Enrollment token to enroll admin user
                 pattern: ^([a-zA-Z0-9_=]+)\.([a-zA-Z0-9_=]+)\.([a-zA-Z0-9_\-\+\/=]*)
                 type: string
               zitiMgmtApi:
-                description: Ziti Network Controller Base URL https://${fqdn or ip}:port
+                description: Controller Base URL https://${fqdn or ip}:port
                 type: string
               zitiRouterEnrollmentToken:
-                description: Ziti Network Controller Base URL https://${fqdn or ip}:port
+                description: Router Enrollment token to register it with Ziti Network
                 pattern: ^([a-zA-Z0-9_=]+)\.([a-zA-Z0-9_=]+)\.([a-zA-Z0-9_\-\+\/=]*)
                 type: string
             required:
+            - debug
             - imageTag
             - routerDeploymentNamePrefix
             - routerReplicas

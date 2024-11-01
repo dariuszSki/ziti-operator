@@ -239,10 +239,10 @@ func createNewRouterConfiguration(zitirouter *zitiv1alpha1.ZitiRouter) *corev1.C
 	c := &ze.Router{
 		Version: 3,
 		Identity: ze.Identity{
-			Cert:           "/etc/ziti/config" + zitirouter.Spec.RouterDeploymentNamePrefix + ".cert",
-			ServerCert:     "/etc/ziti/config" + zitirouter.Spec.RouterDeploymentNamePrefix + ".server.chain.cert",
-			Key:            "/etc/ziti/config" + zitirouter.Spec.RouterDeploymentNamePrefix + ".key",
-			Ca:             "/etc/ziti/config" + zitirouter.Spec.RouterDeploymentNamePrefix + ".cas",
+			Cert:           "/etc/ziti/config/" + zitirouter.Spec.RouterDeploymentNamePrefix + ".cert",
+			ServerCert:     "/etc/ziti/config/" + zitirouter.Spec.RouterDeploymentNamePrefix + ".server.chain.cert",
+			Key:            "/etc/ziti/config/" + zitirouter.Spec.RouterDeploymentNamePrefix + ".key",
+			Ca:             "/etc/ziti/config/" + zitirouter.Spec.RouterDeploymentNamePrefix + ".cas",
 			AltServerCerts: ze.AltServerCerts{},
 		},
 		Controller: ze.Controller{
@@ -261,7 +261,7 @@ func createNewRouterConfiguration(zitirouter *zitiv1alpha1.ZitiRouter) *corev1.C
 				Binding: "edge",
 				Address: "tls:0.0.0.0:8443",
 				Options: ze.EdgeListenerOptions{
-					Advertise:         "tls::443",
+					Advertise:         zitirouter.Spec.RouterDeploymentNamePrefix + "." + zitirouter.ObjectMeta.Namespace + ".svc:443",
 					ConnectTimeoutMs:  5000,
 					GetSessionTimeout: 60,
 				},
@@ -304,7 +304,6 @@ func createNewRouterConfiguration(zitirouter *zitiv1alpha1.ZitiRouter) *corev1.C
 			RateLimitedWorkerCount:  64,
 		},
 	}
-
 	routerConfig, err := c.MarshalYAML()
 	if err != nil {
 		log.Info("Error marshalling config", zitirouter.ObjectMeta.Name, err)
@@ -328,6 +327,7 @@ func createNewRouterConfiguration(zitirouter *zitiv1alpha1.ZitiRouter) *corev1.C
 func createRouterDeployment(zitirouter *zitiv1alpha1.ZitiRouter) *appsv1.StatefulSet {
 	replicas := zitirouter.Spec.RouterReplicas
 	defaultConfigMode := int32(0444)
+	rootUser := int64(0)
 	return &appsv1.StatefulSet{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      zitirouter.Spec.RouterDeploymentNamePrefix,
@@ -377,17 +377,40 @@ func createRouterDeployment(zitirouter *zitiv1alpha1.ZitiRouter) *appsv1.Statefu
 								},
 								{
 									Name:  "ZITI_HOME",
-									Value: "/etc/ziti",
+									Value: "/etc/ziti/config",
 								},
 								{
 									Name:  "ZITI_ROUTER_NAME",
 									Value: zitirouter.Spec.RouterDeploymentNamePrefix,
 								},
+								{
+									Name:  "DEBUG",
+									Value: zitirouter.Spec.Debug,
+								},
+							},
+							Command: []string{
+								"/entrypoint.bash",
+							},
+							Args: []string{
+								"run",
+								"/etc/ziti/config/ziti-router.yaml",
 							},
 							Ports: []corev1.ContainerPort{
 								{
 									ContainerPort: 8443,
 								},
+							},
+							SecurityContext: &corev1.SecurityContext{
+								Capabilities: &corev1.Capabilities{
+									Add: []corev1.Capability{
+										"NET_ADMIN",
+										"NET_BIND_SERVICE",
+									},
+									Drop: []corev1.Capability{
+										"ALL",
+									},
+								},
+								RunAsUser: &rootUser,
 							},
 							VolumeMounts: []corev1.VolumeMount{
 								{
