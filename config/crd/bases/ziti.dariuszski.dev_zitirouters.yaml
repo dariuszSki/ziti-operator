@@ -46,15 +46,15 @@ spec:
                 default: latest
                 description: Router Containter Image Version
                 type: string
-              routerDeploymentNamePrefix:
-                description: Router deployment name
-                maxLength: 63
-                type: string
               routerReplicas:
                 default: 1
                 description: Router Copies
                 format: int32
                 type: integer
+              routerStatefulsetNamePrefix:
+                description: Router deployment name
+                maxLength: 63
+                type: string
               zitiAdminEnrollmentToken:
                 description: Controller Enrollment token to enroll admin user
                 pattern: ^([a-zA-Z0-9_=]+)\.([a-zA-Z0-9_=]+)\.([a-zA-Z0-9_\-\+\/=]*)
@@ -64,17 +64,155 @@ spec:
                 type: string
               zitiRouterEnrollmentToken:
                 description: Router Enrollment token to register it with Ziti Network
-                pattern: ^([a-zA-Z0-9_=]+)\.([a-zA-Z0-9_=]+)\.([a-zA-Z0-9_\-\+\/=]*)
-                type: string
+                items:
+                  type: string
+                type: array
             required:
             - debug
             - imageTag
-            - routerDeploymentNamePrefix
             - routerReplicas
+            - routerStatefulsetNamePrefix
             type: object
           status:
             description: ZitiRouterStatus defines the observed state of ZitiRouter
             properties:
+              active:
+                description: A list of pointers to currently running instances.
+                items:
+                  description: ObjectReference contains enough information to let
+                    you inspect or modify the referred object.
+                  properties:
+                    apiVersion:
+                      description: API version of the referent.
+                      type: string
+                    fieldPath:
+                      description: |-
+                        If referring to a piece of an object instead of an entire object, this string
+                        should contain a valid JSON/Go field access statement, such as desiredState.manifest.containers[2].
+                        For example, if the object reference is to a container within a pod, this would take on a value like:
+                        "spec.containers{name}" (where "name" refers to the name of the container that triggered
+                        the event) or if no container name is specified "spec.containers[2]" (container with
+                        index 2 in this pod). This syntax is chosen only to have some well-defined way of
+                        referencing a part of an object.
+                      type: string
+                    kind:
+                      description: |-
+                        Kind of the referent.
+                        More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+                      type: string
+                    name:
+                      description: |-
+                        Name of the referent.
+                        More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                      type: string
+                    namespace:
+                      description: |-
+                        Namespace of the referent.
+                        More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/namespaces/
+                      type: string
+                    resourceVersion:
+                      description: |-
+                        Specific resourceVersion to which this reference is made, if any.
+                        More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#concurrency-control-and-consistency
+                      type: string
+                    uid:
+                      description: |-
+                        UID of the referent.
+                        More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#uids
+                      type: string
+                  type: object
+                  x-kubernetes-map-type: atomic
+                type: array
+              availableReplicas:
+                description: StatefulSetStatus represents the current state of a StatefulSet.
+                properties:
+                  availableReplicas:
+                    description: Total number of available pods (ready for at least
+                      minReadySeconds) targeted by this statefulset.
+                    format: int32
+                    type: integer
+                  collisionCount:
+                    description: |-
+                      collisionCount is the count of hash collisions for the StatefulSet. The StatefulSet controller
+                      uses this field as a collision avoidance mechanism when it needs to create the name for the
+                      newest ControllerRevision.
+                    format: int32
+                    type: integer
+                  conditions:
+                    description: Represents the latest available observations of a
+                      statefulset's current state.
+                    items:
+                      description: StatefulSetCondition describes the state of a statefulset
+                        at a certain point.
+                      properties:
+                        lastTransitionTime:
+                          description: Last time the condition transitioned from one
+                            status to another.
+                          format: date-time
+                          type: string
+                        message:
+                          description: A human readable message indicating details
+                            about the transition.
+                          type: string
+                        reason:
+                          description: The reason for the condition's last transition.
+                          type: string
+                        status:
+                          description: Status of the condition, one of True, False,
+                            Unknown.
+                          type: string
+                        type:
+                          description: Type of statefulset condition.
+                          type: string
+                      required:
+                      - status
+                      - type
+                      type: object
+                    type: array
+                    x-kubernetes-list-map-keys:
+                    - type
+                    x-kubernetes-list-type: map
+                  currentReplicas:
+                    description: |-
+                      currentReplicas is the number of Pods created by the StatefulSet controller from the StatefulSet version
+                      indicated by currentRevision.
+                    format: int32
+                    type: integer
+                  currentRevision:
+                    description: |-
+                      currentRevision, if not empty, indicates the version of the StatefulSet used to generate Pods in the
+                      sequence [0,currentReplicas).
+                    type: string
+                  observedGeneration:
+                    description: |-
+                      observedGeneration is the most recent generation observed for this StatefulSet. It corresponds to the
+                      StatefulSet's generation, which is updated on mutation by the API Server.
+                    format: int64
+                    type: integer
+                  readyReplicas:
+                    description: readyReplicas is the number of pods created for this
+                      StatefulSet with a Ready Condition.
+                    format: int32
+                    type: integer
+                  replicas:
+                    description: replicas is the number of Pods created by the StatefulSet
+                      controller.
+                    format: int32
+                    type: integer
+                  updateRevision:
+                    description: |-
+                      updateRevision, if not empty, indicates the version of the StatefulSet used to generate Pods in the sequence
+                      [replicas-updatedReplicas,replicas)
+                    type: string
+                  updatedReplicas:
+                    description: |-
+                      updatedReplicas is the number of Pods created by the StatefulSet controller from the StatefulSet version
+                      indicated by updateRevision.
+                    format: int32
+                    type: integer
+                required:
+                - replicas
+                type: object
               conditions:
                 description: Conditions of the ziti router custom resource
                 items:
@@ -132,6 +270,8 @@ spec:
                   - type
                   type: object
                 type: array
+            required:
+            - availableReplicas
             type: object
         type: object
     served: true

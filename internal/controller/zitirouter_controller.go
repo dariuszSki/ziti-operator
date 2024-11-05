@@ -18,10 +18,12 @@ package controller
 
 import (
 	"context"
+	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
-	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -48,8 +50,9 @@ type ZitiRouterReconciler struct {
 // +kubebuilder:rbac:groups=ziti.dariuszski.dev,resources=zitirouters/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=ziti.dariuszski.dev,resources=zitirouters/finalizers,verbs=update
 // +kubebuilder:rbac:groups=ziti.dariuszski.dev,resources=zitirouters/events,verbs=get;list;watch;create;update;patch
+// +kubebuilder:rbac:groups=apps,resources=statefulsets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=events,verbs=get;list;watch;create;update;patch
 
@@ -64,40 +67,97 @@ type ZitiRouterReconciler struct {
 // - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.19.0/pkg/reconcile
 func (r *ZitiRouterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := log.FromContext(ctx)
+	var err error
+	// Fetch Ziti Router Instance
 	zitirouter := &zitiv1alpha1.ZitiRouter{}
 	if err := r.Get(ctx, req.NamespacedName, zitirouter); err != nil {
-		log.Error(err, "failed to get Ziti Router")
-		return ctrl.Result{}, client.IgnoreNotFound(err)
+		if apierrors.IsNotFound(err) {
+			log.Info("Ziti Router resource not found. Ignoring since it must be deleted")
+			return ctrl.Result{}, nil
+		}
+		log.Error(err, "Failed to get Ziti Router")
+		return ctrl.Result{}, err
 	}
 
 	// Initialize completion Resource status
 	configMapReady := false
-	deploymentReady := false
-	log.Info("Right before addOrUpdateRouterConfiguration")
-	// Add or Update Router Configuration
-	if err := r.addOrUpdateRouterConfiguration(ctx, zitirouter); err != nil {
-		log.Error(err, "Failed to add or update Configuration Map for Ziti Router")
-		addStatusCondition(&zitirouter.Status, "RouterConfigurationNotReady", metav1.ConditionFalse, "RouterConfigurationNotReady", "Failed to add or update Ziti Router Configuration")
-		return ctrl.Result{}, err
-	} else {
+	statefulsetReady := false
+
+	// Check if the Router ConfigMap already exists, if not create a new one
+	foundCfgm := &corev1.ConfigMap{}
+	err = r.Get(ctx, types.NamespacedName{Name: zitirouter.Spec.RouterStatefulsetNamePrefix + "-config", Namespace: zitirouter.Namespace}, foundCfgm)
+	if err != nil && apierrors.IsNotFound(err) {
+		// Define a new Router ConfigMap
+		cfgm := r.configMapForZitiRouter(zitirouter)
+		log.Info("Creating a new ConfigMap", "ConfigMap.Namespace", cfgm.Namespace, "ConfigMap.Name", cfgm.Name)
+		if err := r.Create(ctx, cfgm); err != nil {
+			log.Error(err, "Failed to create new ConfigMap", "ConfigMap.Namespace", cfgm.Namespace, "ConfigMap.Name", cfgm.Name)
+			addStatusCondition(&zitirouter.Status, "RouterConfigurationNotReady", metav1.ConditionFalse, "RouterConfigurationNotReady", "Failed to add or update Ziti Router Configuration")
+			return ctrl.Result{}, err
+		}
 		configMapReady = true
-	}
-
-	// Add or update Deployment
-	if err := r.addOrUpdateRouterDeployment(ctx, zitirouter); err != nil {
-		log.Error(err, "Failed to add or update Deployment for Ziti Router")
-		addStatusCondition(&zitirouter.Status, "RouterDeploymentNotReady", metav1.ConditionFalse, "RouterDeploymentNotReady", "Failed to add or update Ziti Router Deployment")
+		return ctrl.Result{RequeueAfter: time.Minute}, nil
+	} else if err != nil {
+		log.Error(err, "Failed to get ConfigMap")
 		return ctrl.Result{}, err
 	} else {
-		deploymentReady = true
+		// Ensure the ConfigMap is up-to-date
+		cfgm := r.configMapForZitiRouter(zitirouter)
+		// Compare relevant fields to determine if an update is needed
+		if foundCfgm != cfgm {
+			// ConfigMap has drifted, update it
+			if err := r.Update(ctx, cfgm); err != nil {
+				return ctrl.Result{}, err
+			}
+			log.Info("Configuration updated", "ConfigMap.Namespace", cfgm.Namespace, "ConfigMap.Name", cfgm.Name)
+			r.recoder.Event(zitirouter, corev1.EventTypeNormal, "ConfigurationUpdated", "Router Configuration updated successfully")
+		} else {
+			log.Info("Configuration is up to date, no action required", "ConfigMap.Namespace", foundCfgm.Namespace, "ConfigMap.Name", foundCfgm.Name)
+		}
 	}
 
-	if configMapReady && deploymentReady {
-		addStatusCondition(&zitirouter.Status, "RouterConfigurationReady", metav1.ConditionTrue, "RouterConfigurationRead", "Ziti Router Configuration is ready")
-		addStatusCondition(&zitirouter.Status, "RouterDeploymentReady", metav1.ConditionTrue, "RouterDeploymentReady", "Ziti Router Pods are ready")
+	// Check if the Statefulset already exists, if not create a new one
+	foundSfs := &appsv1.StatefulSet{}
+	err = r.Get(ctx, types.NamespacedName{Name: zitirouter.Spec.RouterStatefulsetNamePrefix, Namespace: zitirouter.Namespace}, foundSfs)
+	if err != nil && apierrors.IsNotFound(err) {
+		// Define a new Statefulset
+		sfs := r.statefulsetForZitiRouter(zitirouter)
+		log.Info("Creating a new Statefulset", "Statefulset.Namespace", sfs.Namespace, "Statefulset.Name", sfs.Name)
+		if err := r.Create(ctx, sfs); err != nil {
+			log.Error(err, "Failed to create new Statefulset", "Statefulset.Namespace", sfs.Namespace, "Statefulset.Name", sfs.Name)
+			addStatusCondition(&zitirouter.Status, "RouterStatefulsetNotReady", metav1.ConditionFalse, "RouterStatefulsetNotReady", "Failed to add or update Ziti Router Statefulset")
+			return ctrl.Result{}, err
+		}
+		statefulsetReady = true
+		// Requeue the request to ensure the Statefulset is created
+		return ctrl.Result{RequeueAfter: time.Minute}, nil
+	} else if err != nil {
+		log.Error(err, "Failed to get Stateful")
+		return ctrl.Result{}, err
 	}
+
+	// Ensure the Statefulset replicas matches the desired state
+	replicas := zitirouter.Spec.RouterReplicas
+	if *foundSfs.Spec.Replicas != replicas {
+		foundSfs.Spec.Replicas = &replicas
+		if err := r.Update(ctx, foundSfs); err != nil {
+			log.Error(err, "Failed to update Statefulset replicas", "Statefulset.Namespace", foundSfs.Namespace, "Statefulset.Name", foundSfs.Name)
+			return ctrl.Result{}, err
+		}
+		// Requeue the request to ensure the correct state is achieved
+		return ctrl.Result{Requeue: true}, nil
+	}
+
+	// Add or update Statefulset
+	if configMapReady && statefulsetReady {
+		addStatusCondition(&zitirouter.Status, "RouterConfigurationReady", metav1.ConditionTrue, "RouterConfigurationRead", "Ziti Router Configuration is ready")
+		addStatusCondition(&zitirouter.Status, "RouterStatefulsetReady", metav1.ConditionTrue, "RouterStatefulsetReady", "Ziti Router Pods are ready")
+	}
+
 	log.Info("Reconciliation complete")
-	if err := r.updateStatus(ctx, zitirouter); err != nil {
+	// Update Ziti Router status to reflect that the Statefulset is available
+	zitirouter.Status.Status.AvailableReplicas = foundSfs.Status.AvailableReplicas
+	if err := r.Status().Update(ctx, zitirouter); err != nil {
 		log.Error(err, "Failed to update Ziti Router status")
 		return ctrl.Result{}, err
 	}
@@ -128,121 +188,15 @@ func addStatusCondition(status *zitiv1alpha1.ZitiRouterStatus, condType string, 
 	status.Conditions = append(status.Conditions, condition)
 }
 
-// Function to update the status of the zitirouter object
-func (r *ZitiRouterReconciler) updateStatus(ctx context.Context, zitirouter *zitiv1alpha1.ZitiRouter) error {
-	// Update the status of the Ziti Router object
-	if err := r.Status().Update(ctx, zitirouter); err != nil {
-		return err
-	}
-
-	return nil
-}
-
-func (r *ZitiRouterReconciler) addOrUpdateRouterConfiguration(ctx context.Context, zitirouter *zitiv1alpha1.ZitiRouter) error {
-	log := log.FromContext(ctx)
-	deployedRouterConfiguration := &corev1.ConfigMapList{}
-	log.Info("In router addOrUpdateRouterConfiguration")
-	err := r.List(ctx, deployedRouterConfiguration, &client.ListOptions{
-		Namespace: zitirouter.ObjectMeta.Namespace,
-	})
-	if err != nil {
-		return err
-	}
-	if len(deployedRouterConfiguration.Items) > 0 {
-		// Search for router configmap if exists
-		log.Info("list of configmaps", "List of Items", deployedRouterConfiguration.Items)
-		for _, configmap := range deployedRouterConfiguration.Items {
-			// If exists
-			if configmap.ObjectMeta.Name == zitirouter.Spec.RouterDeploymentNamePrefix+"-config" {
-				existingConfiguration := &configmap
-				createNewConfiguration := createNewRouterConfiguration(zitirouter)
-				// Compare relevant fields to determine if an update is needed
-				if existingConfiguration != createNewConfiguration {
-					// Deployment has drifted, update it
-					existingConfiguration = createNewConfiguration
-					if err := r.Update(ctx, existingConfiguration); err != nil {
-						return err
-					}
-					log.Info("Configuration updated", "configuration", existingConfiguration.Name)
-					r.recoder.Event(zitirouter, corev1.EventTypeNormal, "ConfigurationUpdated", "Router Configuration updated successfully")
-				} else {
-					log.Info("Configuration is up to date, no action required", "configuration", existingConfiguration.Name)
-				}
-				return nil
-			}
-		}
-
-	}
-
-	// Router Configuration does not exist, create it
-	newConfiguration := createNewRouterConfiguration(zitirouter)
-	if err := controllerutil.SetControllerReference(zitirouter, newConfiguration, r.Scheme); err != nil {
-		return err
-	}
-	if err := r.Create(ctx, newConfiguration); err != nil {
-		return err
-	}
-	r.recoder.Event(zitirouter, corev1.EventTypeNormal, "ConfigurationCreated", "New Configuration created successfully")
-	log.Info("New Configuration created", "name", zitirouter.ObjectMeta.Name)
-	return nil
-}
-
-func (r *ZitiRouterReconciler) addOrUpdateRouterDeployment(ctx context.Context, zitirouter *zitiv1alpha1.ZitiRouter) error {
-	log := log.FromContext(ctx)
-	deployedRouterList := &appsv1.StatefulSetList{}
-	labelSelector := labels.Set{"app": "zitirouter-" + zitirouter.ObjectMeta.Namespace}
-
-	err := r.List(ctx, deployedRouterList, &client.ListOptions{
-		Namespace:     zitirouter.ObjectMeta.Namespace,
-		LabelSelector: labelSelector.AsSelector(),
-	})
-	if err != nil {
-		return err
-	}
-
-	if len(deployedRouterList.Items) > 0 {
-		// Deployment exists, update it
-		log.Info("Found exisitng configuration", "configuration", deployedRouterList)
-		existingDeployment := &deployedRouterList.Items[0] // Assuming only one deployment exists
-		configuredDeployment := createRouterDeployment(zitirouter)
-
-		// Compare relevant fields to determine if an update is needed
-		if existingDeployment != configuredDeployment {
-			// Deployment has drifted, update it
-			existingDeployment.Spec = configuredDeployment.Spec
-			if err := r.Update(ctx, existingDeployment); err != nil {
-				return err
-			}
-			log.Info("Deployment updated", "deployment", existingDeployment.Name)
-			r.recoder.Event(zitirouter, corev1.EventTypeNormal, "DeploymentUpdated", "Deployment updated successfully")
-		} else {
-			log.Info("Deployment is up to date, no action required", "deployment", existingDeployment.Name)
-		}
-		return nil
-	}
-	log.Info("Updating configuration", "configuration", deployedRouterList)
-	// Deployment does not exist, create it
-	newDeployment := createRouterDeployment(zitirouter)
-	if err := controllerutil.SetControllerReference(zitirouter, newDeployment, r.Scheme); err != nil {
-		return err
-	}
-	if err := r.Create(ctx, newDeployment); err != nil {
-		return err
-	}
-	r.recoder.Event(zitirouter, corev1.EventTypeNormal, "DeploymentCreated", "New Deployment created successfully")
-	log.Info("New Deployment created", "name", zitirouter.ObjectMeta.Name)
-	return nil
-}
-
-func createNewRouterConfiguration(zitirouter *zitiv1alpha1.ZitiRouter) *corev1.ConfigMap {
+func (r *ZitiRouterReconciler) configMapForZitiRouter(zitirouter *zitiv1alpha1.ZitiRouter) *corev1.ConfigMap {
 	log := log.Log
 	c := &ze.Router{
 		Version: 3,
 		Identity: ze.Identity{
-			Cert:           "/etc/ziti/config/" + zitirouter.Spec.RouterDeploymentNamePrefix + ".cert",
-			ServerCert:     "/etc/ziti/config/" + zitirouter.Spec.RouterDeploymentNamePrefix + ".server.chain.cert",
-			Key:            "/etc/ziti/config/" + zitirouter.Spec.RouterDeploymentNamePrefix + ".key",
-			Ca:             "/etc/ziti/config/" + zitirouter.Spec.RouterDeploymentNamePrefix + ".cas",
+			Cert:           "/etc/ziti/config/" + zitirouter.Spec.RouterStatefulsetNamePrefix + ".cert",
+			ServerCert:     "/etc/ziti/config/" + zitirouter.Spec.RouterStatefulsetNamePrefix + ".server.chain.cert",
+			Key:            "/etc/ziti/config/" + zitirouter.Spec.RouterStatefulsetNamePrefix + ".key",
+			Ca:             "/etc/ziti/config/" + zitirouter.Spec.RouterStatefulsetNamePrefix + ".cas",
 			AltServerCerts: ze.AltServerCerts{},
 		},
 		Controller: ze.Controller{
@@ -261,7 +215,7 @@ func createNewRouterConfiguration(zitirouter *zitiv1alpha1.ZitiRouter) *corev1.C
 				Binding: "edge",
 				Address: "tls:0.0.0.0:8443",
 				Options: ze.EdgeListenerOptions{
-					Advertise:         zitirouter.Spec.RouterDeploymentNamePrefix + "." + zitirouter.ObjectMeta.Namespace + ".svc:443",
+					Advertise:         zitirouter.Spec.RouterStatefulsetNamePrefix + "." + zitirouter.ObjectMeta.Namespace + ".svc:443",
 					ConnectTimeoutMs:  5000,
 					GetSessionTimeout: 60,
 				},
@@ -309,10 +263,9 @@ func createNewRouterConfiguration(zitirouter *zitiv1alpha1.ZitiRouter) *corev1.C
 		log.Info("Error marshalling config", zitirouter.ObjectMeta.Name, err)
 		return &corev1.ConfigMap{}
 	}
-
-	return &corev1.ConfigMap{
+	cfgm := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      zitirouter.Spec.RouterDeploymentNamePrefix + "-config",
+			Name:      zitirouter.Spec.RouterStatefulsetNamePrefix + "-config",
 			Namespace: zitirouter.ObjectMeta.Namespace,
 			Labels: map[string]string{
 				"app": "zitirouter-" + zitirouter.ObjectMeta.Namespace,
@@ -322,32 +275,35 @@ func createNewRouterConfiguration(zitirouter *zitiv1alpha1.ZitiRouter) *corev1.C
 			"ziti-router.yaml": string(routerConfig),
 		},
 	}
+	// Set the ownerRef for ConfigMap ensuring that it
+	// will be deleted when Ziti Router CR is deleted.
+	controllerutil.SetControllerReference(zitirouter, cfgm, r.Scheme)
+	return cfgm
 }
 
-func createRouterDeployment(zitirouter *zitiv1alpha1.ZitiRouter) *appsv1.StatefulSet {
+// statefulsetForZitiRouter returns a Statefulset object for Ziti Router
+func (r *ZitiRouterReconciler) statefulsetForZitiRouter(zitirouter *zitiv1alpha1.ZitiRouter) *appsv1.StatefulSet {
 	replicas := zitirouter.Spec.RouterReplicas
 	defaultConfigMode := int32(0444)
 	rootUser := int64(0)
-	return &appsv1.StatefulSet{
+
+	sfs := &appsv1.StatefulSet{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      zitirouter.Spec.RouterDeploymentNamePrefix,
+			Name:      zitirouter.Spec.RouterStatefulsetNamePrefix,
 			Namespace: zitirouter.ObjectMeta.Namespace,
-			Labels: map[string]string{
-				"app": "zitirouter-" + zitirouter.ObjectMeta.Namespace,
-			},
 		},
 		Spec: appsv1.StatefulSetSpec{
 			Replicas: &replicas,
 			Selector: &metav1.LabelSelector{
-				MatchLabels: map[string]string{
-					"app": "zitirouter-" + zitirouter.ObjectMeta.Namespace,
-				},
+				MatchLabels: map[string]string{"app": zitirouter.Spec.RouterStatefulsetNamePrefix},
+			},
+			PersistentVolumeClaimRetentionPolicy: &appsv1.StatefulSetPersistentVolumeClaimRetentionPolicy{
+				WhenDeleted: appsv1.PersistentVolumeClaimRetentionPolicyType("Delete"),
+				WhenScaled:  appsv1.PersistentVolumeClaimRetentionPolicyType("Delete"),
 			},
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
-					Labels: map[string]string{
-						"app": "zitirouter-" + zitirouter.ObjectMeta.Namespace,
-					},
+					Labels: map[string]string{"app": zitirouter.Spec.RouterStatefulsetNamePrefix},
 				},
 				Spec: corev1.PodSpec{
 					Containers: []corev1.Container{
@@ -356,9 +312,27 @@ func createRouterDeployment(zitirouter *zitiv1alpha1.ZitiRouter) *appsv1.Statefu
 							Image: "openziti/ziti-router:" + zitirouter.Spec.ImageTag,
 							Env: []corev1.EnvVar{
 								{
-									Name:  "ZITI_ENROLL_TOKEN",
-									Value: zitirouter.Spec.ZitiRouterEnrollmentToken,
+									Name: "SECRET_NAME",
+									ValueFrom: &corev1.EnvVarSource{
+										FieldRef: &corev1.ObjectFieldSelector{
+											FieldPath: metav1.ObjectNameField,
+										},
+									},
 								},
+								{
+									Name:  "ZITI_ENROLL_TOKEN",
+									Value: zitirouter.Spec.ZitiRouterEnrollmentToken[0],
+								},
+								// {
+								// 	Name: "ZITI_ENROLL_TOKEN",
+								// 	ValueFrom: &corev1.EnvVarSource{
+								// 		ConfigMapKeyRef: &corev1.ConfigMapKeySelector{
+								// 			LocalObjectReference: corev1.LocalObjectReference{
+								// 				Name: string(zitirouter.Spec.ZitiAdminEnrollmentToken[0]),
+								// 			},
+								// 		},
+								// 	},
+								// },
 								{
 									Name:  "ZITI_BOOTSTRAP",
 									Value: "true",
@@ -381,7 +355,7 @@ func createRouterDeployment(zitirouter *zitiv1alpha1.ZitiRouter) *appsv1.Statefu
 								},
 								{
 									Name:  "ZITI_ROUTER_NAME",
-									Value: zitirouter.Spec.RouterDeploymentNamePrefix,
+									Value: zitirouter.Spec.RouterStatefulsetNamePrefix,
 								},
 								{
 									Name:  "DEBUG",
@@ -430,7 +404,7 @@ func createRouterDeployment(zitirouter *zitiv1alpha1.ZitiRouter) *appsv1.Statefu
 							Name: "ziti-router-config",
 							VolumeSource: corev1.VolumeSource{
 								ConfigMap: &corev1.ConfigMapVolumeSource{
-									LocalObjectReference: corev1.LocalObjectReference{Name: zitirouter.Spec.RouterDeploymentNamePrefix + "-config"},
+									LocalObjectReference: corev1.LocalObjectReference{Name: zitirouter.Spec.RouterStatefulsetNamePrefix + "-config"},
 									DefaultMode:          &defaultConfigMode,
 								},
 							},
@@ -457,12 +431,19 @@ func createRouterDeployment(zitirouter *zitiv1alpha1.ZitiRouter) *appsv1.Statefu
 			},
 		},
 	}
+
+	// Set the ownerRef for Statefulset ensuring that it
+	// will be deleted when Ziti Router CR is deleted.
+	controllerutil.SetControllerReference(zitirouter, sfs, r.Scheme)
+	return sfs
 }
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *ZitiRouterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	r.recoder = mgr.GetEventRecorderFor("zitirouter-controller")
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&zitiv1alpha1.ZitiRouter{}).
+		For(&zitiv1alpha1.ZitiRouter{}). // Watch the primary resource
+		Owns(&appsv1.StatefulSet{}).     // Watch the secondary resource (Statefulset)
+		Owns(&corev1.ConfigMap{}).       // Watch the secondary resource (ConifgMap)
 		Complete(r)
 }
