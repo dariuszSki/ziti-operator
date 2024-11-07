@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -28,6 +29,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	zitiv1alpha1 "github.com/dariuszSki/ziti-operator/api/v1alpha1"
@@ -40,8 +42,14 @@ import (
 // ZitiRouterReconciler reconciles a ZitiRouter object
 type ZitiRouterReconciler struct {
 	client.Client
-	Scheme  *runtime.Scheme
-	recoder record.EventRecorder
+	Scheme   *runtime.Scheme
+	Recorder record.EventRecorder
+}
+
+type JsonPatchEntry struct {
+	OP    string          `json:"op"`
+	Path  string          `json:"path"`
+	Value json.RawMessage `json:"value,omitempty"`
 }
 
 // Ziti Router Config template
@@ -51,6 +59,7 @@ type ZitiRouterReconciler struct {
 // +kubebuilder:rbac:groups=ziti.dariuszski.dev,resources=zitirouters/finalizers,verbs=update
 // +kubebuilder:rbac:groups=ziti.dariuszski.dev,resources=zitirouters/events,verbs=get;list;watch;create;update;patch
 // +kubebuilder:rbac:groups=apps,resources=statefulsets,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update;patch;delete
@@ -79,10 +88,6 @@ func (r *ZitiRouterReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return ctrl.Result{}, err
 	}
 
-	// Initialize completion Resource status
-	configMapReady := false
-	statefulsetReady := false
-
 	// Check if the Router ConfigMap already exists, if not create a new one
 	foundCfgm := &corev1.ConfigMap{}
 	err = r.Get(ctx, types.NamespacedName{Name: zitirouter.Spec.RouterStatefulsetNamePrefix + "-config", Namespace: zitirouter.Namespace}, foundCfgm)
@@ -92,10 +97,11 @@ func (r *ZitiRouterReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		log.Info("Creating a new ConfigMap", "ConfigMap.Namespace", cfgm.Namespace, "ConfigMap.Name", cfgm.Name)
 		if err := r.Create(ctx, cfgm); err != nil {
 			log.Error(err, "Failed to create new ConfigMap", "ConfigMap.Namespace", cfgm.Namespace, "ConfigMap.Name", cfgm.Name)
-			addStatusCondition(&zitirouter.Status, "RouterConfigurationNotReady", metav1.ConditionFalse, "RouterConfigurationNotReady", "Failed to add or update Ziti Router Configuration")
+			zitirouter.Status.Conditions = r.addStatusCondition(zitirouter, "RouterConfigurationNotReady", metav1.ConditionFalse, "RouterConfigurationNotReady", "Failed to add or update Ziti Router Configuration")
 			return ctrl.Result{}, err
 		}
-		configMapReady = true
+		r.Recorder.Eventf(zitirouter, corev1.EventTypeNormal, "RouterConfigurationReady", "Ziti Router Configuration is ready")
+		zitirouter.Status.Conditions = r.addStatusCondition(zitirouter, "RouterConfigurationReady", metav1.ConditionTrue, "RouterConfigurationRead", "Ziti Router Configuration is ready")
 		return ctrl.Result{RequeueAfter: time.Minute}, nil
 	} else if err != nil {
 		log.Error(err, "Failed to get ConfigMap")
@@ -104,13 +110,13 @@ func (r *ZitiRouterReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		// Ensure the ConfigMap is up-to-date
 		cfgm := r.configMapForZitiRouter(zitirouter)
 		// Compare relevant fields to determine if an update is needed
-		if foundCfgm != cfgm {
+		if foundCfgm.Data["ziti-router.yaml"] != cfgm.Data["ziti-router.yaml"] {
 			// ConfigMap has drifted, update it
 			if err := r.Update(ctx, cfgm); err != nil {
 				return ctrl.Result{}, err
 			}
 			log.Info("Configuration updated", "ConfigMap.Namespace", cfgm.Namespace, "ConfigMap.Name", cfgm.Name)
-			r.recoder.Event(zitirouter, corev1.EventTypeNormal, "ConfigurationUpdated", "Router Configuration updated successfully")
+			r.Recorder.Eventf(zitirouter, corev1.EventTypeNormal, "ConfigurationUpdated", "Router Configuration updated successfully")
 		} else {
 			log.Info("Configuration is up to date, no action required", "ConfigMap.Namespace", foundCfgm.Namespace, "ConfigMap.Name", foundCfgm.Name)
 		}
@@ -125,38 +131,64 @@ func (r *ZitiRouterReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		log.Info("Creating a new Statefulset", "Statefulset.Namespace", sfs.Namespace, "Statefulset.Name", sfs.Name)
 		if err := r.Create(ctx, sfs); err != nil {
 			log.Error(err, "Failed to create new Statefulset", "Statefulset.Namespace", sfs.Namespace, "Statefulset.Name", sfs.Name)
-			addStatusCondition(&zitirouter.Status, "RouterStatefulsetNotReady", metav1.ConditionFalse, "RouterStatefulsetNotReady", "Failed to add or update Ziti Router Statefulset")
+			r.addStatusCondition(zitirouter, "RouterStatefulsetNotReady", metav1.ConditionFalse, "RouterStatefulsetNotReady", "Failed to add or update Ziti Router Statefulset")
 			return ctrl.Result{}, err
 		}
-		statefulsetReady = true
+		r.Recorder.Eventf(zitirouter, corev1.EventTypeNormal, "RouterStatefulsetCreated", "Ziti Router Pods are being deployed")
+		zitirouter.Status.Conditions = r.addStatusCondition(zitirouter, "RouterStatefulsetReady", metav1.ConditionTrue, "RouterStatefulsetReady", "Ziti Router Pods are ready")
 		// Requeue the request to ensure the Statefulset is created
 		return ctrl.Result{RequeueAfter: time.Minute}, nil
 	} else if err != nil {
 		log.Error(err, "Failed to get Stateful")
 		return ctrl.Result{}, err
-	}
+	} else {
+		// Ensure the Statefulset replicas matches the desired state
+		if *foundSfs.Spec.Replicas != zitirouter.Spec.RouterReplicas {
+			*foundSfs.Spec.Replicas = zitirouter.Spec.RouterReplicas
+			if err := r.Update(ctx, foundSfs); err != nil {
+				log.Error(err, "Failed to update Statefulset replicas", "Statefulset.Namespace", foundSfs.Namespace, "Statefulset.Name", foundSfs.Name)
+				return ctrl.Result{}, err
+			}
+			r.Recorder.Eventf(zitirouter, corev1.EventTypeNormal, "RouterStatefulsetUpdated", "Statefulset Spec Replicas were updated to", *foundSfs.Spec.Replicas)
+			zitirouter.Status.Conditions = r.addStatusCondition(zitirouter, "RouterStatefulsetNotReady", metav1.ConditionTrue, "RouterStatefulsetNotReady", "Ziti Router Pods are not ready")
+			return ctrl.Result{Requeue: true}, nil
+		} else {
+			// Check if the Statefulset Pods already exists
+			podList := &corev1.PodList{}
+			podListOpts := []client.ListOption{
+				client.InNamespace(req.Namespace),
+			}
+			err = r.List(ctx, podList, podListOpts[0])
+			if err != nil {
+				r.Recorder.Eventf(zitirouter, corev1.EventTypeNormal, "RouterStatefulsetUpdated", "No Pods found:", podList)
+			}
+			for _, pod := range podList.Items {
+				for _, condition := range pod.Status.Conditions {
+					if condition.Type == "ContainersReady" {
+						if condition.Status == "False" {
+							r.Recorder.Eventf(zitirouter, corev1.EventTypeNormal, "RouterStatefulsetPodName", "Pod Name:", pod.Name)
+							valuePatch, _ := json.Marshal(corev1.EnvVar{Name: "ZITI_ENROLL_TOKEN", Value: zitirouter.Spec.ZitiRouterEnrollmentToken[pod.Name]})
+							jsonPatchData, _ := json.Marshal([]JsonPatchEntry{{OP: "add", Path: "/spec/template/spec/containers/0/env/-", Value: valuePatch}})
+							if err := r.Patch(ctx, foundSfs, client.RawPatch(types.JSONPatchType, jsonPatchData)); err != nil {
+								log.Error(err, "Failed to update Statefulset EnvVar", "Statefulset.Namespace", foundSfs.Namespace, "Statefulset.Name", foundSfs.Name)
+								return ctrl.Result{}, err
+							}
+							r.Recorder.Eventf(zitirouter, corev1.EventTypeNormal, "RouterStatefulsetName", "Pod Token Updated:", string(zitirouter.Spec.ZitiRouterEnrollmentToken[pod.Name]))
+							return ctrl.Result{}, nil
 
-	// Ensure the Statefulset replicas matches the desired state
-	replicas := zitirouter.Spec.RouterReplicas
-	if *foundSfs.Spec.Replicas != replicas {
-		foundSfs.Spec.Replicas = &replicas
-		if err := r.Update(ctx, foundSfs); err != nil {
-			log.Error(err, "Failed to update Statefulset replicas", "Statefulset.Namespace", foundSfs.Namespace, "Statefulset.Name", foundSfs.Name)
-			return ctrl.Result{}, err
+						}
+					}
+
+				}
+
+			}
 		}
-		// Requeue the request to ensure the correct state is achieved
-		return ctrl.Result{Requeue: true}, nil
-	}
-
-	// Add or update Statefulset
-	if configMapReady && statefulsetReady {
-		addStatusCondition(&zitirouter.Status, "RouterConfigurationReady", metav1.ConditionTrue, "RouterConfigurationRead", "Ziti Router Configuration is ready")
-		addStatusCondition(&zitirouter.Status, "RouterStatefulsetReady", metav1.ConditionTrue, "RouterStatefulsetReady", "Ziti Router Pods are ready")
 	}
 
 	log.Info("Reconciliation complete")
 	// Update Ziti Router status to reflect that the Statefulset is available
-	zitirouter.Status.Status.AvailableReplicas = foundSfs.Status.AvailableReplicas
+	zitirouter.Status.AvailableReplicas = foundSfs.Status.AvailableReplicas
+	zitirouter.Status.ReadyReplicas = foundSfs.Status.ReadyReplicas
 	if err := r.Status().Update(ctx, zitirouter); err != nil {
 		log.Error(err, "Failed to update Ziti Router status")
 		return ctrl.Result{}, err
@@ -165,27 +197,24 @@ func (r *ZitiRouterReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	return ctrl.Result{}, nil
 }
 
-func addStatusCondition(status *zitiv1alpha1.ZitiRouterStatus, condType string, statusType metav1.ConditionStatus, reason, message string) {
-	for i, existingCondition := range status.Conditions {
-		if existingCondition.Type == condType {
+func (r *ZitiRouterReconciler) addStatusCondition(zitirouter *zitiv1alpha1.ZitiRouter, condType string, statusType metav1.ConditionStatus, reason string, message string) []*metav1.Condition {
+	for i, condition := range zitirouter.Status.Conditions {
+		if condition.Type == condType {
 			// Condition already exists, update it
-			status.Conditions[i].Status = statusType
-			status.Conditions[i].Reason = reason
-			status.Conditions[i].Message = message
-			status.Conditions[i].LastTransitionTime = metav1.Now()
-			return
+			zitirouter.Status.Conditions[i].Status = statusType
+			zitirouter.Status.Conditions[i].Reason = reason
+			zitirouter.Status.Conditions[i].Message = message
+			zitirouter.Status.Conditions[i].LastTransitionTime = metav1.Now()
+		} else {
+			// Condition already exists, update it
+			condition.Status = statusType
+			condition.Reason = reason
+			condition.Message = message
+			condition.LastTransitionTime = metav1.Now()
+			zitirouter.Status.Conditions = append(zitirouter.Status.Conditions, condition)
 		}
 	}
-
-	// Condition does not exist, add it
-	condition := metav1.Condition{
-		Type:               condType,
-		Status:             statusType,
-		Reason:             reason,
-		Message:            message,
-		LastTransitionTime: metav1.Now(),
-	}
-	status.Conditions = append(status.Conditions, condition)
+	return zitirouter.Status.Conditions
 }
 
 func (r *ZitiRouterReconciler) configMapForZitiRouter(zitirouter *zitiv1alpha1.ZitiRouter) *corev1.ConfigMap {
@@ -319,10 +348,6 @@ func (r *ZitiRouterReconciler) statefulsetForZitiRouter(zitirouter *zitiv1alpha1
 										},
 									},
 								},
-								{
-									Name:  "ZITI_ENROLL_TOKEN",
-									Value: zitirouter.Spec.ZitiRouterEnrollmentToken[0],
-								},
 								// {
 								// 	Name: "ZITI_ENROLL_TOKEN",
 								// 	ValueFrom: &corev1.EnvVarSource{
@@ -440,10 +465,10 @@ func (r *ZitiRouterReconciler) statefulsetForZitiRouter(zitirouter *zitiv1alpha1
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *ZitiRouterReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	r.recoder = mgr.GetEventRecorderFor("zitirouter-controller")
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&zitiv1alpha1.ZitiRouter{}). // Watch the primary resource
 		Owns(&appsv1.StatefulSet{}).     // Watch the secondary resource (Statefulset)
-		Owns(&corev1.ConfigMap{}).       // Watch the secondary resource (ConifgMap)
+		Owns(&corev1.ConfigMap{}).       // Watch the secondary resource (ConfigMap)
+		Watches(&corev1.Pod{}, &handler.EnqueueRequestForObject{}).
 		Complete(r)
 }

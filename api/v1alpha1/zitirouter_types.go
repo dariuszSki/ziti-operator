@@ -17,8 +17,6 @@ limitations under the License.
 package v1alpha1
 
 import (
-	appsv1 "k8s.io/api/apps/v1"
-	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -39,7 +37,7 @@ type ZitiRouterSpec struct {
 	ZitiAdminEnrollmentToken string `json:"zitiAdminEnrollmentToken,omitempty"`
 
 	// Router Enrollment token to register it with Ziti Network
-	ZitiRouterEnrollmentToken []string `json:"zitiRouterEnrollmentToken,omitempty"`
+	ZitiRouterEnrollmentToken map[string]string `json:"zitiRouterEnrollmentToken,omitempty"`
 
 	// Router deployment name
 	// +kubebuilder:validation:MaxLength:=63
@@ -63,12 +61,13 @@ type ZitiRouterStatus struct {
 	// Important: Run "make" to regenerate code after modifying this file
 
 	// Conditions of the ziti router custom resource
-	// +kubebuilder:validation:Optional
-	Conditions []metav1.Condition `json:"conditions,omitempty"`
-	// A list of pointers to currently running instances.
-	// +optional
-	Active []corev1.ObjectReference `json:"active,omitempty"`
-	Status appsv1.StatefulSetStatus `json:"availableReplicas"`
+	// +listType=map
+	// +listMapKey=type
+	Conditions []*metav1.Condition `json:"conditions,omitempty"`
+
+	// Statefulset Status
+	AvailableReplicas int32 `json:"availableReplicas"`
+	ReadyReplicas     int32 `json:"readyReplicas"`
 }
 
 // +kubebuilder:object:root=true
