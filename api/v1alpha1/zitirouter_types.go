@@ -45,7 +45,7 @@ type ZitiRouterSpec struct {
 
 	// Router Copies
 	// +kubebuilder:default:=1
-	RouterReplicas int32 `json:"routerReplicas"`
+	RouterReplicas *int32 `json:"routerReplicas"`
 
 	// Router Containter Image Version
 	// +kubebuilder:default:=latest
