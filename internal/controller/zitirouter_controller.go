@@ -166,21 +166,17 @@ func (r *ZitiRouterReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 				for _, condition := range pod.Status.Conditions {
 					if condition.Type == "ContainersReady" {
 						if condition.Status == "False" {
-							r.Recorder.Eventf(zitirouter, corev1.EventTypeNormal, "RouterStatefulsetPodName", "Pod Name:", pod.Name)
-							valuePatch, _ := json.Marshal(corev1.EnvVar{Name: "ZITI_ENROLL_TOKEN", Value: zitirouter.Spec.ZitiRouterEnrollmentToken[pod.Name]})
-							jsonPatchData, _ := json.Marshal([]JsonPatchEntry{{OP: "add", Path: "/spec/template/spec/containers/0/env/-", Value: valuePatch}})
-							if err := r.Patch(ctx, foundSfs, client.RawPatch(types.JSONPatchType, jsonPatchData)); err != nil {
-								log.Error(err, "Failed to update Statefulset EnvVar", "Statefulset.Namespace", foundSfs.Namespace, "Statefulset.Name", foundSfs.Name)
+							valuePatch, _ := json.Marshal(zitirouter.Spec.ZitiRouterEnrollmentToken[pod.Name])
+							jsonPatchData, _ := json.Marshal([]JsonPatchEntry{{OP: "replace", Path: "/data/" + zitirouter.Spec.RouterStatefulsetNamePrefix, Value: valuePatch}})
+							if err := r.Patch(ctx, foundCfgm, client.RawPatch(types.JSONPatchType, jsonPatchData)); err != nil {
+								log.Error(err, "Failed to update ConfigMap Token", "ConfigMap.Namespace", foundCfgm.Namespace, "ConfigMap.Name", foundCfgm.Name)
 								return ctrl.Result{}, err
 							}
-							r.Recorder.Eventf(zitirouter, corev1.EventTypeNormal, "RouterStatefulsetName", "Pod Token Updated:", string(zitirouter.Spec.ZitiRouterEnrollmentToken[pod.Name]))
-							return ctrl.Result{}, nil
-
+							r.Recorder.Eventf(zitirouter, corev1.EventTypeNormal, "RouterConfigMapName", "Pod Token Updated:", string(zitirouter.Spec.ZitiRouterEnrollmentToken[pod.Name]))
+							return ctrl.Result{RequeueAfter: time.Minute}, nil
 						}
 					}
-
 				}
-
 			}
 		}
 	}
@@ -301,7 +297,8 @@ func (r *ZitiRouterReconciler) configMapForZitiRouter(zitirouter *zitiv1alpha1.Z
 			},
 		},
 		Data: map[string]string{
-			"ziti-router.yaml": string(routerConfig),
+			"ziti-router.yaml":                          string(routerConfig),
+			zitirouter.Spec.RouterStatefulsetNamePrefix: "",
 		},
 	}
 	// Set the ownerRef for ConfigMap ensuring that it
@@ -340,24 +337,29 @@ func (r *ZitiRouterReconciler) statefulsetForZitiRouter(zitirouter *zitiv1alpha1
 							Name:  "zitirouter",
 							Image: "openziti/ziti-router:" + zitirouter.Spec.ImageTag,
 							Env: []corev1.EnvVar{
-								{
-									Name: "SECRET_NAME",
-									ValueFrom: &corev1.EnvVarSource{
-										FieldRef: &corev1.ObjectFieldSelector{
-											FieldPath: metav1.ObjectNameField,
-										},
-									},
-								},
 								// {
-								// 	Name: "ZITI_ENROLL_TOKEN",
+								// 	Name: "SECRET_NAME",
 								// 	ValueFrom: &corev1.EnvVarSource{
-								// 		ConfigMapKeyRef: &corev1.ConfigMapKeySelector{
-								// 			LocalObjectReference: corev1.LocalObjectReference{
-								// 				Name: string(zitirouter.Spec.ZitiAdminEnrollmentToken[0]),
-								// 			},
+								// 		FieldRef: &corev1.ObjectFieldSelector{
+								// 			FieldPath: metav1.ObjectNameField,
 								// 		},
 								// 	},
 								// },
+								// {
+								// 	Name:  "ZITI_ENROLL_TOKEN",
+								// 	Value: "",
+								// },
+								{
+									Name: "ZITI_ENROLL_TOKEN",
+									ValueFrom: &corev1.EnvVarSource{
+										ConfigMapKeyRef: &corev1.ConfigMapKeySelector{
+											LocalObjectReference: corev1.LocalObjectReference{
+												Name: zitirouter.Spec.RouterStatefulsetNamePrefix + "-config",
+											},
+											Key: zitirouter.Spec.RouterStatefulsetNamePrefix,
+										},
+									},
+								},
 								{
 									Name:  "ZITI_BOOTSTRAP",
 									Value: "true",
