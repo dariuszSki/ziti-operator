@@ -5,32 +5,6 @@ metadata:
   name: manager-role
 rules:
 - apiGroups:
-  - ""
-  resources:
-  - configmaps
-  - persistentvolumeclaims
-  - pods
-  - services
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - patch
-  - update
-  - watch
-- apiGroups:
-  - ""
-  resources:
-  - events
-  verbs:
-  - create
-  - get
-  - list
-  - patch
-  - update
-  - watch
-- apiGroups:
   - apps
   resources:
   - statefulsets
@@ -43,8 +17,24 @@ rules:
   - update
   - watch
 - apiGroups:
+  - ""
+  resources:
+  - configmaps
+  - persistentvolumeclaims
+  - pods
+  - secrets
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
   - ziti.dariuszski.dev
   resources:
+  - ziticontrollers
   - zitirouters
   verbs:
   - create
@@ -57,23 +47,14 @@ rules:
 - apiGroups:
   - ziti.dariuszski.dev
   resources:
-  - zitirouters/events
-  verbs:
-  - create
-  - get
-  - list
-  - patch
-  - update
-  - watch
-- apiGroups:
-  - ziti.dariuszski.dev
-  resources:
+  - ziticontrollers/finalizers
   - zitirouters/finalizers
   verbs:
   - update
 - apiGroups:
   - ziti.dariuszski.dev
   resources:
+  - ziticontrollers/status
   - zitirouters/status
   verbs:
   - get

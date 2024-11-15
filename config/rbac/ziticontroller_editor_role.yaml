@@ -5,14 +5,14 @@ metadata:
   labels:
     app.kubernetes.io/name: ziti-operator
     app.kubernetes.io/managed-by: kustomize
-  name: zitirouter-editor-role
+  name: ziticontroller-editor-role
 rules:
 - apiGroups:
   - ziti.dariuszski.dev
   resources:
-  - zitirouters
-  - zitirouters/status
-  - zitirouters/finalizers 
+  - ziticontrollers
+  - ziticontrollers/finalizers
+  - ziticontrollers/status
   verbs:
   - create
   - delete

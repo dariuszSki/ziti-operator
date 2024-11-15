@@ -145,11 +145,19 @@ func main() {
 	}
 
 	if err = (&controller.ZitiRouterReconciler{
-		Client:   mgr.GetClient(),
-		Scheme:   mgr.GetScheme(),
-		Recorder: mgr.GetEventRecorderFor("zitirouter-controller"),
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
+		// Recorder: mgr.GetEventRecorderFor("zitirouter-controller"),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "ZitiRouter")
+		os.Exit(1)
+	}
+	if err = (&controller.ZitiControllerReconciler{
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
+		// Recorder: mgr.GetEventRecorderFor("ziticontroler-controller"),
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "ZitiController")
 		os.Exit(1)
 	}
 	// +kubebuilder:scaffold:builder

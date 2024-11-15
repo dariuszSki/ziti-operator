@@ -4,7 +4,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-type Config interface {
+type ParseConfig interface {
 	MarshalYAML() ([]byte, error)
 	UnmarshalYAML([]byte) error
 }

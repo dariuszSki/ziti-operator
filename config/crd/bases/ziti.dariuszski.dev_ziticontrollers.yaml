@@ -4,20 +4,20 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.16.1
-  name: zitirouters.ziti.dariuszski.dev
+  name: ziticontrollers.ziti.dariuszski.dev
 spec:
   group: ziti.dariuszski.dev
   names:
-    kind: ZitiRouter
-    listKind: ZitiRouterList
-    plural: zitirouters
-    singular: zitirouter
+    kind: ZitiController
+    listKind: ZitiControllerList
+    plural: ziticontrollers
+    singular: ziticontroller
   scope: Namespaced
   versions:
   - name: v1alpha1
     schema:
       openAPIV3Schema:
-        description: ZitiRouter is the Schema for the zitirouters API
+        description: ZitiController is the Schema for the ziticontrollers API
         properties:
           apiVersion:
             description: |-
@@ -37,46 +37,26 @@ spec:
           metadata:
             type: object
           spec:
-            description: ZitiRouterSpec defines the desired state of ZitiRouter
+            description: ZitiControllerSpec defines the desired state of ZitiController
             properties:
-              debug:
-                description: Router Log Level
-                type: string
-              imageTag:
-                default: latest
-                description: Router Containter Image Version
-                type: string
-              routerReplicas:
-                default: 1
-                description: Router Copies
-                format: int32
-                type: integer
-              routerStatefulsetNamePrefix:
-                default: ziti-router
-                description: Router deployment name
+              controllerStatefulsetNamePrefix:
+                default: ziti-controller
+                description: Controller deployment name
                 maxLength: 63
                 type: string
-              zitiMgmtApi:
-                description: Controller Base URL https://${fqdn or ip}:port
+              zitiAdminEnrollmentToken:
+                description: Controller Enrollment token to enroll admin user
+                pattern: ^([a-zA-Z0-9_=]+)\.([a-zA-Z0-9_=]+)\.([a-zA-Z0-9_\-\+\/=]*)
                 type: string
-              zitiRouterEnrollmentToken:
-                additionalProperties:
-                  type: string
-                description: Router Enrollment token to register it with Ziti Network
-                type: object
+              zitiMgmtApi:
+                description: Controller FQDN:PORT
+                type: string
             required:
-            - debug
-            - imageTag
-            - routerReplicas
-            - routerStatefulsetNamePrefix
+            - controllerStatefulsetNamePrefix
             type: object
           status:
-            description: ZitiRouterStatus defines the observed state of ZitiRouter
+            description: ZitiControllerStatus defines the observed state of ZitiController
             properties:
-              availableReplicas:
-                description: Statefulset Status
-                format: int32
-                type: integer
               conditions:
                 description: Conditions of the ziti router custom resource
                 items:
@@ -134,12 +114,6 @@ spec:
                   - type
                   type: object
                 type: array
-              readyReplicas:
-                format: int32
-                type: integer
-            required:
-            - availableReplicas
-            - readyReplicas
             type: object
         type: object
     served: true

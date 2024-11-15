@@ -17,4 +17,13 @@ resources:
   kind: ZitiRouter
   path: github.com/dariuszSki/ziti-operator/api/v1alpha1
   version: v1alpha1
+- api:
+    crdVersion: v1
+    namespaced: true
+  controller: true
+  domain: dariuszski.dev
+  group: ziti
+  kind: ZitiController
+  path: github.com/dariuszSki/ziti-operator/api/v1alpha1
+  version: v1alpha1
 version: "3"
